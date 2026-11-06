@@ -37,7 +37,7 @@ env:
   ECR_REPOSITORY: myproject-backend # Tên ECR repository lưu image của backend (check trên ECR)
   ECS_CLUSTER: myproject-dev-cluster # Tên Cluster đã tạo trong ECS dùng để chạy dự án (check trên ECS)
   ECS_SERVICE: myproject-dev-backend # Tên Service nằm trong Cluster (LƯU Ý: backend và backend chạy trên 2 service khác nhau)
-  CONTAINER_NAME: myproject-dev-backend # Tên container
+  CONTAINER_NAME: backend # Tên container
 
 
 # Đây là job validate, có mục đích kiểm tra source backend có thể cài đặt và build thành công trước khi triển khai lên AWS ECS.
