@@ -1,0 +1,185 @@
+name: CICD for backend to Amazon Cloud
+
+# Đoạn này khai báo những sự kiện nào sẽ kích hoạt GitHub Actions workflow:
+on:
+  # Workflow chạy khi có Pull Request nhắm vào branch deploy.
+  push:
+    branches: [main]
+  # workflow_dispatch cho phép bạn chạy workflow thủ công trên giao diện GitHub 
+  # mà không cần push code hoặc tạo Pull Request
+  workflow_dispatch:
+
+
+# Đoạn này kiểm soát quyền của workflow và việc nhiều lần deploy chạy đồng thời.
+permissions:
+  contents: read # Cho phép workflow đọc nội dung repository.
+  id-token: write # Cho phép GitHub Actions tạo OIDC token để xác thực với AWS.
+
+# GitHub Actions
+  #→ yêu cầu OIDC token
+  #→ AWS kiểm tra token và Trust Policy
+  #→ GitHub Actions assume IAM Role
+  #→ nhận AWS credentials tạm thời
+
+# concurrency kiểm soát việc nhiều workflow run có cùng nhóm được phép chạy như thế nào.
+concurrency:
+  group: psychology-backend-production
+  cancel-in-progress: false
+# Ở đây, tất cả workflow run thuộc nhóm cv-ranking-backend-production sẽ không được chạy đồng thời.
+# Nếu Run A đang deploy mà Run B được kích hoạt:
+# Run A: tiếp tục chạy đến khi hoàn tất
+# Run B: chờ Run A
+
+
+# Đây là phần khai báo các biến môi trường dùng chung cho toàn bộ workflow:
+env:
+  AWS_REGION: ap-northeast-3
+  ECR_REPOSITORY: myproject-backend # Tên ECR repository lưu image của backend (check trên ECR)
+  ECS_CLUSTER: myproject-dev-cluster # Tên Cluster đã tạo trong ECS dùng để chạy dự án (check trên ECS)
+  ECS_SERVICE: myproject-dev-backend # Tên Service nằm trong Cluster (LƯU Ý: backend và backend chạy trên 2 service khác nhau)
+  CONTAINER_NAME: myproject-dev-backend # Tên container
+
+
+# Đây là job validate, có mục đích kiểm tra source backend có thể cài đặt và build thành công trước khi triển khai lên AWS ECS.
+jobs:
+  validate:
+    name: Validate backend
+    # GitHub tạo một máy ảo Ubuntu tạm thời để chạy job:
+    runs-on: ubuntu-latest
+    # Giới hạn toàn bộ job chạy tối đa 15 phút.
+    timeout-minutes: 15
+
+    # Các step bên trong cùng một job sẽ chạy tuần tự trên cùng một Ubuntu runner.
+    steps:
+      # Lấy source code từ GitHub repository xuống runner.
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      # Thiết lập môi trường Python phiên bản 3.12 trên runner.
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # Cài dependencies
+      - name: Install dependencies
+        # để cài các thư viện được định nghĩa chính xác trong package-lock.json.
+        run: python -m pip install -r requirements.txt # Xóa node_modules cũ trước khi cài. (phù hợp với CI/CD hơn npm install)
+
+
+
+  # Build Docker image Backend
+  # → Push image lên Amazon ECR
+  # → Tạo ECS Task Definition revision mới
+  # → Cập nhật ECS Service
+  # → Chờ deployment ổn định
+  deploy:
+    name: Build and deploy
+    if: github.event_name != 'pull_request' # Chỉ chạy job nếu sự kiện kích hoạt workflow không phải Pull Request.
+    needs: validate # Job deploy phụ thuộc vào job validate.
+    runs-on: ubuntu-latest # GitHub tạo một Ubuntu runner tạm thời để chạy job này.
+    timeout-minutes: 30 # Job được phép chạy tối đa 30 phút. Nếu vượt quá thời gian, GitHub tự dừng và đánh dấu job thất bại.
+
+    steps:
+      # Tải source code của commit hiện tại xuống Ubuntu runner.
+      - name: Checkout source
+        uses: actions/checkout@v6
+
+      - name: Show GitHub context
+        run: |
+          echo "Repository: $GITHUB_REPOSITORY"
+          echo "Event: $GITHUB_EVENT_NAME"
+          echo "Ref: $GITHUB_REF"
+          echo "Ref name: $GITHUB_REF_NAME"
+
+      # GitHub Actions yêu cầu AWS cấp thông tin đăng nhập tạm thời thông qua OIDC.
+      # - name: Configure temporary AWS credentials through OIDC
+      #   uses: aws-actions/configure-aws-credentials@v6.1.0
+      #   with:
+      #     role-to-assume: ${{ vars.AWS_ROLE_ARN }} # Lấy ARN của IAM Role từ GitHub Actions Variables.
+      #     aws-region: ${{ env.AWS_REGION }} # Lấy giá trị đã khai báo ở env:
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6.1.0
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Đăng nhập Docker client trên runner vào Amazon ECR.
+      - name: Login to Amazon ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # Tạo URI cho Docker image
+      - name: Prepare immutable image URI
+        id: image
+        env:
+          REGISTRY: ${{ steps.login-ecr.outputs.registry }}
+          # Tag được tạo từ hai giá trị:
+          # github.sha: mã SHA của commit đang được deploy.
+          # github.run_id: ID duy nhất của lần chạy workflow.
+          IMAGE_TAG: ${{ github.sha }}-${{ github.run_id }}
+        run: echo "uri=$REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG" >> "$GITHUB_OUTPUT"
+        # Bước này ghép các thành phần thành một Docker image URI hoàn chỉnh.
+
+
+      # Thiết lập Docker Buildx trên runner
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+      
+      # Build và push Docker image
+      - name: Build and push AMD64 image
+        id: build-image
+        uses: docker/build-push-action@v7
+        with:
+          context: . # Dùng thư mục hiện tại làm Docker build context.
+          platforms: linux/amd64
+          push: true
+          provenance: false
+          sbom: false
+          tags: ${{ steps.image.outputs.uri }}
+          build-args: |
+            NEXT_PUBLIC_API_BASE=
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      
+      # Mục đích là lấy Task Definition mà ECS Service hiện đang sử dụng.
+      # Lệnh thứ nhất: lấy thông tin ECS Service
+      # Lệnh thứ hai: tải nội dung Task Definition
+      - name: Download the task definition used by the service
+        run: |
+          TASK_DEFINITION_ARN=$(aws ecs describe-services \
+            --cluster "$ECS_CLUSTER" \
+            --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' \
+            --output text)
+          aws ecs describe-task-definition \
+            --task-definition "$TASK_DEFINITION_ARN" \
+            --query taskDefinition \
+            > task-definition.json
+
+      # Cập nhật image trong Task Definition
+      # Action đọc file: task-definition.json
+      # Sau đó tìm container có tên: backend
+      # và thay image cũ bằng image mới.
+      - name: Put the new image into the task definition
+        id: render-task-definition
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ steps.image.outputs.uri }}
+
+      # Đăng ký Task Definition revision mới: documind-frontend:1 --> documind-frontend:2
+      # Cập nhật ECS Service: chuyển từ documind-frontend:1 --> documind-frontend:2
+      # ECS bắt đầu rolling deployment: Khởi tạo task mới với image mới --> Đưa task mới vào phục vụ traffic, dừng task cũ
+      - name: Register the revision and deploy the ECS service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render-task-definition.outputs.task-definition }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          service: ${{ env.ECS_SERVICE }}
+          wait-for-service-stability: true
+          # GitHub Actions không kết thúc ngay sau khi yêu cầu ECS deploy. Nó chờ đến khi ECS Service ổn định
