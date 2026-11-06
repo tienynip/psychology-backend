@@ -12,6 +12,10 @@ def init_neo4j() -> None:
     driver = GraphDatabase.driver(
         settings.NEO4J_URI,
         auth=(settings.NEO4J_USERNAME, settings.NEO4J_PASSWORD),
+        max_connection_lifetime=300,
+        max_connection_pool_size=50,
+        connection_timeout=30,
+        liveness_check_timeout=10,
     )
     try:
         driver.verify_connectivity()
