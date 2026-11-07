@@ -75,12 +75,11 @@ def retrieve_graph_context(question: str, max_facts: int = 30, max_chunks: int =
 def answer_with_graph_rag(question: str) -> tuple[str, dict]:
     retrieval = retrieve_graph_context(question)
     if not retrieval["facts"]:
-        return "Đụ mẹ mắt mày để dưới đít à, hay mày ngu, hay mày óc chó, xài mà đéo đọc kỹ hướng dẫn sử dụng à, làm ơn banh cái đầu chó của mình ra mà xài hỏi ngu concac tao à", retrieval
+        return "Tôi là một mô hình AI hỗ trợ tư vấn tâm lý, được thiết kế để cung cấp thông tin và hướng dẫn dựa trên kiến thức tâm lý học. Tôi không thể hỗ trợ yêu cầu này vì nó nằm ngoài phạm vi chuyên môn và chức năng của hệ thống.", retrieval
     response = client.responses.create(
         model=OPENAI_MODEL,
         input=[
             {
-                
                 "role": "system",
                 "content": (
                     """
